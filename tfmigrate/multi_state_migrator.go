@@ -261,21 +261,32 @@ func (m *MultiStateMigrator) Apply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("[INFO] [migrator] multi state migrator plan phase for apply success!\n")
+
+	log.Printf("[INFO] [migrator@%s] push the new state to remote\n", m.fromTf.Dir())
+	err = m.fromTf.StatePush(ctx, fromState)
+	if err != nil {
+		log.Printf("[ERROR] [migrator@%s] failed to push state to remote: %s\n", m.fromTf.Dir(), err)
+
+		log.Printf(`[ERROR] no state has been pushed to remote, please check the state manually
+		 Do not run 'terraform apply' in the fromDir (%s), it will break the state and DELETE RESOURCES!`, m.fromTf.Dir())
+		return err
+	}
 
 	// push the new states to remote.
 	// We push toState before fromState, because when moving resources across
 	// states, write them to new state first and then remove them from old one.
-	log.Printf("[INFO] [migrator] start multi state migrator apply phase\n")
 	log.Printf("[INFO] [migrator@%s] push the new state to remote\n", m.toTf.Dir())
 	err = m.toTf.StatePush(ctx, toState)
 	if err != nil {
+		log.Printf("[ERROR] [migrator@%s] failed to push state to remote: %s\n", m.toTf.Dir(), err)
+		log.Printf(`[ERROR] no state has been pushed to remote, please check the state manually
+		Do not run 'terraform apply' in the toDir (%s), it will break the state. 
+		The source state is correct though.  
+		Please either recover the state from the backup or fix the issue manually by importing the needed resources manually`, m.toTf.Dir())
 		return err
 	}
-	log.Printf("[INFO] [migrator@%s] push the new state to remote\n", m.fromTf.Dir())
-	err = m.fromTf.StatePush(ctx, fromState)
-	if err != nil {
-		return err
-	}
+
 	log.Printf("[INFO] [migrator] multi state migrator apply success!\n")
 	return nil
 }
