@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/minamijoyo/tfmigrate/config"
 	"github.com/minamijoyo/tfmigrate/history"
@@ -72,6 +75,12 @@ func (r *HistoryRunner) planFile(ctx context.Context, filename string) error {
 
 // planDir plans all unapplied migrations.
 func (r *HistoryRunner) planDir(ctx context.Context) error {
+	// Validate that there are no duplicate migrations before planning
+	err := r.validateNoDuplicates(ctx)
+	if err != nil {
+		return err
+	}
+
 	unapplied := r.hc.UnappliedMigrations()
 
 	if len(unapplied) == 0 {
@@ -128,6 +137,12 @@ func (r *HistoryRunner) Apply(ctx context.Context) (err error) {
 		return err
 	}
 
+	// Validate that there are no duplicate migrations before applying
+	err = r.validateNoDuplicates(ctx)
+	if err != nil {
+		return err
+	}
+
 	// directory mode
 	err = r.applyDir(ctx)
 	return err
@@ -175,4 +190,72 @@ func (r *HistoryRunner) applyDir(ctx context.Context) (err error) {
 	}
 
 	return nil
+}
+
+// validateNoDuplicates validates that there are no duplicate migrations by name.
+// It checks for duplicates in:
+// 1. Local migration files (same migration name in different files)
+// 2. Remote state vs local migrations (migration name already exists in history)
+// Returns an error if duplicates are found.
+func (r *HistoryRunner) validateNoDuplicates(ctx context.Context) error {
+	// Load all migration files and extract their names
+	localMigrationNames := make(map[string][]string) // migration name -> list of files containing it
+
+	for _, filename := range r.hc.Migrations() {
+		path := filepath.Join(r.config.MigrationDir, filename)
+
+		// Read and parse the migration file to get its name
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("failed to read migration file %s: %v", filename, err)
+		}
+
+		mc, err := config.ParseMigrationFile(filename, source)
+		if err != nil {
+			return fmt.Errorf("failed to parse migration file %s: %v", filename, err)
+		}
+
+		migrationName := mc.Name
+		localMigrationNames[migrationName] = append(localMigrationNames[migrationName], filename)
+	}
+
+	// Check for local duplicates (same migration name in multiple files)
+	var localDuplicates []string
+	for migrationName, files := range localMigrationNames {
+		if len(files) > 1 {
+			localDuplicates = append(localDuplicates, fmt.Sprintf("migration name '%s' appears in files: %v", migrationName, files))
+		}
+	}
+
+	if len(localDuplicates) > 0 {
+		return fmt.Errorf("duplicate migration names found locally:\n  %s", strings.Join(localDuplicates, "\n  "))
+	}
+
+	// Check for remote duplicates (migration name already exists in history)
+	var remoteDuplicates []string
+	historyRecords := r.hc.Records()
+	for migrationName, files := range localMigrationNames {
+		// Check if any record in history has the same migration name
+		for historyFilename, record := range historyRecords {
+			if record.Name == migrationName && !contains(files, historyFilename) {
+				remoteDuplicates = append(remoteDuplicates, fmt.Sprintf("migration name '%s' in file '%s' already exists in history (applied in '%s')", migrationName, files[0], historyFilename))
+			}
+		}
+	}
+
+	if len(remoteDuplicates) > 0 {
+		return fmt.Errorf("duplicate migration names found in remote state:\n  %s", strings.Join(remoteDuplicates, "\n  "))
+	}
+
+	return nil
+}
+
+// contains checks if a slice contains a specific string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

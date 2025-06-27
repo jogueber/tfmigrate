@@ -174,3 +174,8 @@ func (c *Controller) AddRecord(filename string, migrationType string, name strin
 
 	c.history.Add(filename, r)
 }
+
+// Records returns the history records map
+func (c *Controller) Records() map[string]Record {
+	return c.history.records
+}
