@@ -21,6 +21,9 @@ type Record struct {
 	// AppliedAt is a timestamp when the migration was applied.
 	// Note that we only record it when the migration was succeed.
 	AppliedAt time.Time
+	// MD5Hash is the MD5 hash of the migration file content when it was applied.
+	// This is used to detect if the migration file has been modified after application.
+	MD5Hash string
 }
 
 // newEmptyHistory initializes a new History.

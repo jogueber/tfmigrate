@@ -2,6 +2,8 @@ package command
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -75,8 +77,14 @@ func (r *HistoryRunner) planFile(ctx context.Context, filename string) error {
 
 // planDir plans all unapplied migrations.
 func (r *HistoryRunner) planDir(ctx context.Context) error {
+	// Update missing MD5 hashes for backward compatibility
+	err := r.updateMissingMD5Hashes(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Validate that there are no duplicate migrations before planning
-	err := r.validateNoDuplicates(ctx)
+	err = r.validateNoDuplicates(ctx)
 	if err != nil {
 		return err
 	}
@@ -138,6 +146,11 @@ func (r *HistoryRunner) Apply(ctx context.Context) (err error) {
 	}
 
 	// Validate that there are no duplicate migrations before applying
+	err = r.updateMissingMD5Hashes(ctx)
+	if err != nil {
+		return err
+	}
+
 	err = r.validateNoDuplicates(ctx)
 	if err != nil {
 		return err
@@ -165,9 +178,18 @@ func (r *HistoryRunner) applyFile(ctx context.Context, filename string) error {
 		return err
 	}
 
+	// Compute MD5 hash of the migration file
+	path := filepath.Join(r.config.MigrationDir, filename)
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read migration file for hash computation %s: %v", filename, err)
+	}
+	hash := md5.Sum(source)
+	md5Hash := hex.EncodeToString(hash[:])
+
 	mc := fr.MigrationConfig()
 	log.Printf("[INFO] [runner] add a record to history: %s\n", filename)
-	r.hc.AddRecord(filename, mc.Type, mc.Name, nil)
+	r.hc.AddRecord(filename, mc.Type, mc.Name, md5Hash, nil)
 
 	return nil
 }
@@ -196,10 +218,13 @@ func (r *HistoryRunner) applyDir(ctx context.Context) (err error) {
 // It checks for duplicates in:
 // 1. Local migration files (same migration name in different files)
 // 2. Remote state vs local migrations (migration name already exists in history)
+// 3. MD5 hash validation (migration files haven't been modified after application)
+// 4. Duplicate MD5 hashes in history (same content applied multiple times)
 // Returns an error if duplicates are found.
 func (r *HistoryRunner) validateNoDuplicates(ctx context.Context) error {
-	// Load all migration files and extract their names
+	// Load all migration files and extract their names and compute hashes
 	localMigrationNames := make(map[string][]string) // migration name -> list of files containing it
+	localMigrationHashes := make(map[string]string)  // filename -> md5 hash
 
 	for _, filename := range r.hc.Migrations() {
 		path := filepath.Join(r.config.MigrationDir, filename)
@@ -209,6 +234,11 @@ func (r *HistoryRunner) validateNoDuplicates(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to read migration file %s: %v", filename, err)
 		}
+
+		// Compute MD5 hash
+		hash := md5.Sum(source)
+		md5Hash := hex.EncodeToString(hash[:])
+		localMigrationHashes[filename] = md5Hash
 
 		mc, err := config.ParseMigrationFile(filename, source)
 		if err != nil {
@@ -231,9 +261,11 @@ func (r *HistoryRunner) validateNoDuplicates(ctx context.Context) error {
 		return fmt.Errorf("duplicate migration names found locally:\n  %s", strings.Join(localDuplicates, "\n  "))
 	}
 
+	// Get history records for validation
+	historyRecords := r.hc.Records()
+
 	// Check for remote duplicates (migration name already exists in history)
 	var remoteDuplicates []string
-	historyRecords := r.hc.Records()
 	for migrationName, files := range localMigrationNames {
 		// Check if any record in history has the same migration name
 		for historyFilename, record := range historyRecords {
@@ -247,6 +279,40 @@ func (r *HistoryRunner) validateNoDuplicates(ctx context.Context) error {
 		return fmt.Errorf("duplicate migration names found in remote state:\n  %s", strings.Join(remoteDuplicates, "\n  "))
 	}
 
+	// Check for MD5 hash mismatches (migration files modified after application)
+	var hashMismatches []string
+	for historyFilename, record := range historyRecords {
+		if localHash, exists := localMigrationHashes[historyFilename]; exists {
+			// Skip validation if no hash stored (backward compatibility)
+			if record.MD5Hash != "" && localHash != record.MD5Hash {
+				hashMismatches = append(hashMismatches, fmt.Sprintf("migration file '%s' has been modified after application (expected hash: %s, current hash: %s)", historyFilename, record.MD5Hash, localHash))
+			}
+		}
+	}
+
+	if len(hashMismatches) > 0 {
+		return fmt.Errorf("migration file integrity check failed:\n  %s", strings.Join(hashMismatches, "\n  "))
+	}
+
+	// Check for duplicate MD5 hashes in history (same content applied multiple times)
+	historyHashToFiles := make(map[string][]string)
+	for historyFilename, record := range historyRecords {
+		if record.MD5Hash != "" {
+			historyHashToFiles[record.MD5Hash] = append(historyHashToFiles[record.MD5Hash], historyFilename)
+		}
+	}
+
+	var duplicateHashes []string
+	for hash, files := range historyHashToFiles {
+		if len(files) > 1 {
+			duplicateHashes = append(duplicateHashes, fmt.Sprintf("duplicate content found in history files: %v (hash: %s)", files, hash))
+		}
+	}
+
+	if len(duplicateHashes) > 0 {
+		return fmt.Errorf("duplicate migration content found in history:\n  %s", strings.Join(duplicateHashes, "\n  "))
+	}
+
 	return nil
 }
 
@@ -258,4 +324,48 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// updateMissingMD5Hashes updates history records that are missing MD5 hashes.
+// This provides backward compatibility for migration files that were applied before MD5 validation was implemented.
+func (r *HistoryRunner) updateMissingMD5Hashes(ctx context.Context) error {
+	updated := false
+	historyRecords := r.hc.Records()
+
+	for historyFilename, record := range historyRecords {
+		// Skip if hash already exists
+		if record.MD5Hash != "" {
+			continue
+		}
+
+		// Check if the migration file still exists locally
+		path := filepath.Join(r.config.MigrationDir, historyFilename)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			log.Printf("[DEBUG] [runner] migration file '%s' no longer exists, skipping MD5 hash update\n", historyFilename)
+			continue
+		}
+
+		// Read the file and compute MD5 hash
+		source, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("[DEBUG] [runner] failed to read migration file '%s' for MD5 update: %v\n", historyFilename, err)
+			continue
+		}
+
+		hash := md5.Sum(source)
+		md5Hash := hex.EncodeToString(hash[:])
+		
+		// Use AddRecord method to update the history
+		r.hc.AddRecord(historyFilename, record.Type, record.Name, md5Hash, &record.AppliedAt)
+		updated = true
+		log.Printf("[INFO] [runner] updated MD5 hash for existing migration: %s\n", historyFilename)
+	}
+
+	// Save the updated history if any records were modified
+	if updated {
+		log.Printf("[INFO] [runner] saving updated history with MD5 hashes\n")
+		return r.hc.Save(ctx)
+	}
+
+	return nil
 }

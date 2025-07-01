@@ -28,6 +28,9 @@ type RecordV1 struct {
 	// AppliedAt is a timestamp when the migration was applied.
 	// Note that we only record it when the migration was succeed.
 	AppliedAt time.Time `json:"applied_at"`
+	// MD5Hash is the MD5 hash of the migration file content when it was applied.
+	// This field is optional for backward compatibility.
+	MD5Hash string `json:"md5_hash,omitempty"`
 }
 
 // newFileV1 converts a History to a FileV1 instance.
