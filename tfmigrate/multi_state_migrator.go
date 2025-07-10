@@ -171,70 +171,100 @@ func (m *MultiStateMigrator) plan(ctx context.Context) (fromCurrentState *tfexec
 		toCurrentState = tfexec.NewState(toNewState.Bytes())
 	}
 
-	// build plan options
-	planOpts := []string{"-input=false", "-no-color", "-detailed-exitcode"}
+	// build base plan options
+	basePlanOpts := []string{"-input=false", "-no-color", "-detailed-exitcode"}
 	if m.o.PlanOut != "" {
-		planOpts = append(planOpts, "-out="+m.o.PlanOut)
+		basePlanOpts = append(basePlanOpts, "-out="+m.o.PlanOut)
 	}
-	if m.fromTfTarget != "" {
-		planOpts = append(planOpts, "-target="+m.fromTfTarget)
-	}
+
 	if m.fromSkipPlan {
 		log.Printf("[INFO] [migrator@%s] skipping check diffs\n", m.fromTf.Dir())
 	} else {
+		// build plan options for fromTf (includes target if specified)
+		fromPlanOpts := make([]string, len(basePlanOpts))
+		copy(fromPlanOpts, basePlanOpts)
+		if m.fromTfTarget != "" {
+			fromPlanOpts = append(fromPlanOpts, "-target="+m.fromTfTarget)
+		}
+
 		// check if a plan in fromDir has no changes.
 		log.Printf("[INFO] [migrator@%s] check diffs\n", m.fromTf.Dir())
-		plan, err := m.fromTf.Plan(ctx, fromCurrentState, planOpts...)
-		clean, _ := checkPlan(plan, m.fromTf, err)
+		plan, err := m.fromTf.Plan(ctx, fromCurrentState, fromPlanOpts...)
+		clean, reason := checkPlan(plan, m.fromTf, err, false, "source") // false = don't allow create actions for source state
 		if !clean {
-			return nil, nil, fmt.Errorf("terraform plan command returns unexpected diffs in %s from_dir: %s", m.fromTf.Dir(), err)
+			log.Printf("[ERROR] [migrator@%s] %s", m.fromTf.Dir(), reason)
+			return nil, nil, fmt.Errorf("terraform plan command returns unexpected diffs in from_dir: %s", m.fromTf.Dir())
 		}
+		log.Printf("[INFO] [migrator@%s] %s", m.fromTf.Dir(), reason)
 	}
 
 	if m.toSkipPlan {
 		log.Printf("[INFO] [migrator@%s] skipping check diffs\n", m.toTf.Dir())
 	} else {
+		// build plan options for toTf (no target option)
+		toPlanOpts := make([]string, len(basePlanOpts))
+		copy(toPlanOpts, basePlanOpts)
+
 		// check if a plan in toDir has no changes.
 		log.Printf("[INFO] [migrator@%s] check diffs\n", m.toTf.Dir())
-		plan, err := m.toTf.Plan(ctx, toCurrentState, planOpts...)
+		plan, err := m.toTf.Plan(ctx, toCurrentState, toPlanOpts...)
 
-		clean, _ := checkPlan(plan, m.toTf, err)
+		clean, reason := checkPlan(plan, m.toTf, err, true, "destination") // true = allow create actions for destination state
 		if !clean {
 			if m.force {
-				log.Printf("[INFO] [migrator@%s] plan has unexpected diffs, but force option is true, ignoring: %s", m.toTf.Dir(), err)
+				log.Printf("[INFO] [migrator@%s] %s", m.toTf.Dir(), reason)
+				log.Printf("[INFO] [migrator@%s] plan has unexpected diffs, but force option is true, ignoring", m.toTf.Dir())
 			} else {
-				return nil, nil, fmt.Errorf("terraform plan command returns unexpected diffs in %s to_dir: %s", m.toTf.Dir(), err)
+				log.Printf("[ERROR] [migrator@%s] %s", m.toTf.Dir(), reason)
+				return nil, nil, fmt.Errorf("terraform plan command returns unexpected diffs  to_dir: %s", m.toTf.Dir())
 			}
+		} else {
+			log.Printf("[INFO] [migrator@%s] %s", m.toTf.Dir(), reason)
 		}
 	}
 
 	return fromCurrentState, toCurrentState, err
 }
 
-func checkPlan(plan *tfexec.Plan, tf tfexec.TerraformCLI, er error) (bool, error) {
+func checkPlan(plan *tfexec.Plan, tf tfexec.TerraformCLI, er error, allowCreate bool, stateType string) (bool, string) {
 	if er != nil {
 
 		if exitErr, ok := er.(tfexec.ExitError); ok && exitErr.ExitCode() == 2 {
 			planJSON, jsonerr := tf.ConvertPlanToJson(plan)
 			if jsonerr != nil {
 				log.Printf("[ERROR] [migrator] failed to parse plan JSON: %s\n", jsonerr)
-				return false, jsonerr
+				return false, fmt.Sprintf("failed to parse plan JSON: %s", jsonerr)
 			}
+
+			log.Printf("[INFO] [migrator@%s] analyzing plan for %s state:", tf.Dir(), stateType)
 
 			if !planJSON.HasChanges() {
 				log.Printf("[INFO] [migrator] plan has only output changes")
 				planJSON.LogOutputChanges()
-				return true, nil
+				return true, fmt.Sprintf("✅ ACCEPTED: %s state plan has only output changes (no resource changes)", stateType)
 			}
 
-			log.Printf("[ERROR] [migrator] unexpected diffs\n")
-			planJSON.LogResourceChanges()
-			return false, nil
+			// If allowCreate is true (for destination state), check if it only has safe actions (create or tag-only updates)
+			if allowCreate && planJSON.HasOnlySafeActions() {
+				log.Printf("[INFO] [migrator] plan has resource changes:")
+				planJSON.LogResourceChangesWithStatus(allowCreate, stateType)
+				return true, fmt.Sprintf("✅ ACCEPTED: %s state plan has only safe actions (create or tag-only changes), which is acceptable for destination state", stateType)
+			}
+
+			// Plan is rejected - log detailed changes with status to show why each change is rejected
+			log.Printf("[INFO] [migrator] plan has resource changes:")
+			planJSON.LogResourceChangesWithStatus(allowCreate, stateType)
+
+			if allowCreate {
+				return false, fmt.Sprintf("❌ REJECTED: %s state plan has changes other than safe actions (create or tag-only changes)", stateType)
+			} else {
+				return false, fmt.Sprintf("❌ REJECTED: %s state plan has unexpected resource changes", stateType)
+			}
 		}
 		log.Printf("[ERROR] [migrator] unexpected error: %s\n", er)
-		return false, er
+		return false, fmt.Sprintf("❌ REJECTED: unexpected error in %s state: %s", stateType, er)
 	}
-	return true, nil
+	return true, fmt.Sprintf("✅ ACCEPTED: %s state plan has no changes", stateType)
 }
 
 // Plan computes new states by applying multi state migration operations to temporary states.
