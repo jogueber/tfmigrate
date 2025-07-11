@@ -17,6 +17,8 @@ var version = "0.4.2"
 
 func main() {
 	log.SetOutput(logOutput())
+	// Remove timestamps from log output
+	log.SetFlags(0)
 	log.Printf("[DEBUG] [main] start: %s", strings.Join(os.Args, " "))
 	log.Printf("[DEBUG] [main] tfmigrate version: %s", version)
 
