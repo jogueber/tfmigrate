@@ -244,11 +244,11 @@ func checkPlan(plan *tfexec.Plan, tf tfexec.TerraformCLI, er error, allowCreate 
 				return true, fmt.Sprintf("✅ ACCEPTED: %s state plan has only output changes (no resource changes)", stateType)
 			}
 
-			// If allowCreate is true (for destination state), check if it only has safe actions (create or tag-only updates)
+			// If allowCreate is true (for destination state), check if it only has safe actions (create, read, or tag-only updates)
 			if allowCreate && planJSON.HasOnlySafeActions() {
 				log.Printf("[INFO] [migrator] plan has resource changes:")
 				planJSON.LogResourceChangesWithStatus(allowCreate, stateType)
-				return true, fmt.Sprintf("✅ ACCEPTED: %s state plan has only safe actions (create or tag-only changes), which is acceptable for destination state", stateType)
+				return true, fmt.Sprintf("✅ ACCEPTED: %s state plan has only safe actions (create, read, or tag-only changes), which is acceptable for destination state", stateType)
 			}
 
 			// Plan is rejected - log detailed changes with status to show why each change is rejected
@@ -256,7 +256,7 @@ func checkPlan(plan *tfexec.Plan, tf tfexec.TerraformCLI, er error, allowCreate 
 			planJSON.LogResourceChangesWithStatus(allowCreate, stateType)
 
 			if allowCreate {
-				return false, fmt.Sprintf("❌ REJECTED: %s state plan has changes other than safe actions (create or tag-only changes)", stateType)
+				return false, fmt.Sprintf("❌ REJECTED: %s state plan has changes other than safe actions (create, read, or tag-only changes)", stateType)
 			} else {
 				return false, fmt.Sprintf("❌ REJECTED: %s state plan has unexpected resource changes", stateType)
 			}

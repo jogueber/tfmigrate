@@ -92,7 +92,7 @@ func (p *TerraformPlanJSON) HasOnlyCreateActions() bool {
 	return true
 }
 
-// HasOnlySafeActions returns true if there are only safe actions (create or tag-only updates)
+// HasOnlySafeActions returns true if there are only safe actions (create, read, or tag-only updates)
 func (p *TerraformPlanJSON) HasOnlySafeActions() bool {
 	for _, rc := range p.ResourceChanges {
 		// Skip no-op actions
@@ -102,6 +102,11 @@ func (p *TerraformPlanJSON) HasOnlySafeActions() bool {
 
 		// Allow create actions
 		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "create" {
+			continue
+		}
+
+		// Allow read actions (data sources)
+		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "read" {
 			continue
 		}
 
@@ -204,6 +209,9 @@ func (p *TerraformPlanJSON) LogResourceChangesWithStatus(allowCreate bool, state
 			} else if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "create" && !allowCreate {
 				statusEmoji = "❌"
 				statusText = "REJECTED (create not allowed in source state)"
+			} else if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "read" {
+				statusEmoji = "✅"
+				statusText = "ACCEPTED (read action - data source)"
 			} else if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "update" && p.isTagOnlyChange(rc) {
 				statusEmoji = "✅"
 				statusText = "ACCEPTED (tag-only change)"
@@ -257,6 +265,8 @@ func formatActions(actions []string) string {
 		switch action {
 		case "create":
 			formatted = append(formatted, "➕ create")
+		case "read":
+			formatted = append(formatted, "📖 read")
 		case "update":
 			formatted = append(formatted, "🔄 update")
 		case "delete":
@@ -364,6 +374,7 @@ func createJSONDiff(before, after interface{}, label string) string {
 	config := formatter.AsciiFormatterConfig{
 		ShowArrayIndex: true,
 		Coloring:       false, // Disable coloring for log output
+
 	}
 
 	formatterInstance := formatter.NewAsciiFormatter(json.RawMessage{}, config)
